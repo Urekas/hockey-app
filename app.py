@@ -59,7 +59,6 @@ st.markdown(
 # -----------------------------------------------------------------------------
 # 1. 데이터 로드 및 전처리 함수
 # -----------------------------------------------------------------------------
-
 def extract_team(row_str):
     """Row 문자열에서 팀명을 추출"""
     if not isinstance(row_str, str):
@@ -162,29 +161,106 @@ def compute_press_metrics(rows_us: pd.DataFrame, rows_opp: pd.DataFrame, team_ti
         'allowed_spp': allowed_spp
     }
 
+# -----------------------------------------------------------------------------
+# 1. 데이터 로드 및 전처리 함수 (버전 A / 버전 B 분리)
+# -----------------------------------------------------------------------------
+
+# [공통] 결측치 채우기 및 팀 추출 (두 함수에서 공통으로 사용)
+def _common_preprocessing(df):
+    # 필수 컬럼 생성
+    for col in ['Row', '지역', '결과', 'Ungrouped', 'Duration']:
+        if col not in df.columns:
+            df[col] = '' if col != 'Duration' else 0
+
+    df['Row'] = df['Row'].fillna('').astype(str)
+    df['지역'] = df['지역'].fillna('').astype(str)
+    df['결과'] = df['결과'].fillna('').astype(str)
+    df['Ungrouped'] = df['Ungrouped'].fillna('').astype(str)
+    df['Duration'] = pd.to_numeric(df['Duration'], errors='coerce').fillna(0)
+    
+    # 팀 추출 함수 적용
+    if 'Team' not in df.columns:
+        df['Team'] = df['Row'].apply(extract_team)
+        
+    return df
+
+# [버전 A] 기존 CSV (깔끔한 포맷) 처리 함수
 @st.cache_data
-def process_data(file):
+def process_basic_data(file):
     file.seek(0)
     try:
-        df = pd.read_csv(file)
-    except UnicodeDecodeError:
-        file.seek(0)
-        df = pd.read_csv(file, encoding='cp949')
-    except pd.errors.EmptyDataError:
+        df = pd.read_csv(file, encoding='utf-8')
+    except:
         file.seek(0)
         df = pd.read_csv(file, encoding='cp949')
 
-    # 필요한 컬럼 결측치 처리
-    df['Row'] = df['Row'].fillna('')
-    df['지역'] = df['지역'].fillna('')
-    df['결과'] = df['결과'].fillna('')
-    df['Ungrouped'] = df['Ungrouped'].fillna('')
-    df['Duration'] = pd.to_numeric(df.get('Duration', 0), errors='coerce').fillna(0)
+    return _common_preprocessing(df)
+
+# [버전 B] 신규 스포츠코드 CSV (태그 뒤섞인 포맷) 처리 함수
+@st.cache_data
+def process_sportscode_data(file):
+    file.seek(0)
+    try:
+        # 컬럼이 들쑥날쑥하므로 30칸으로 강제 확장해서 읽기
+        df = pd.read_csv(file, header=None, names=range(30), encoding='utf-8')
+    except:
+        file.seek(0)
+        df = pd.read_csv(file, header=None, names=range(30), encoding='cp949')
+
+    # 파싱 로직 (Raw Data -> 구조화)
+    parsed_rows = []
+    for _, row in df.iterrows():
+        # 데이터가 너무 짧거나(빈 줄) 필수 항목(Row)이 없으면 패스
+        if pd.isna(row[0]) or pd.isna(row[2]): continue
+        
+        # 0~2번은 고정 (Start, End, Row)
+        start_t = str(row[0]).strip()
+        end_t = str(row[1]).strip()
+        row_val = str(row[2]).strip()
+        
+        # 3~29번 컬럼을 돌며 태그 수집
+        regions = []
+        results = []
+        ungrouped = []
+        
+        for col_idx in range(3, 30):
+            val = row[col_idx]
+            if pd.isna(val): continue
+            val = str(val).strip()
+            if not val: continue
+            
+            # 태그 분류 규칙
+            if "(지역)" in val or any(x in val for x in ['좌_', '우_', '중_', 'LEFT', 'RIGHT', 'CENTER']):
+                regions.append(val)
+            elif "(결과)" in val or any(x in val.lower() for x in ['entry', 'ce', '슈팅', '득점', 'goal', 'out', 'save']):
+                results.append(val)
+            else:
+                ungrouped.append(val)
+        
+        parsed_rows.append({
+            'Start': start_t,
+            'End': end_t,
+            'Row': row_val,
+            '지역': ",".join(regions),
+            '결과': ",".join(results),
+            'Ungrouped': ",".join(ungrouped)
+        })
     
-    # 팀 추출
-    df['Team'] = df['Row'].apply(extract_team)
+    new_df = pd.DataFrame(parsed_rows)
     
-    return df
+    # Duration 계산 (Start, End 차이)
+    def calc_dur(s, e):
+        try:
+            def to_s(t):
+                parts = t.split(':')
+                if len(parts)==3: return float(parts[0])*3600+float(parts[1])*60+float(parts[2])
+                return float(parts[0])*60+float(parts[1])
+            return max(0, to_s(e) - to_s(s))
+        except: return 0
+    
+    new_df['Duration'] = new_df.apply(lambda x: calc_dur(x['Start'], x['End']), axis=1)
+    
+    return _common_preprocessing(new_df)
 
 # -----------------------------------------------------------------------------
 # 1-1. 쿼터 파생/시각화에 필요한 보조 함수 
@@ -1627,16 +1703,41 @@ def render_gps_dashboard(gps_df: pd.DataFrame):
 st.title("🏑 Field Hockey Match Report & GPS Analysis")
 
 st.markdown("### 📂 데이터 파일 업로드")
-upload_container = st.container()
-with upload_container:
-    st.info("📊 **전술/이벤트 분석** (SportsCode)")
-    uploaded_file = st.file_uploader("SportsCode CSV 파일 업로드", type=['csv'], key="sc_uploader")
+st.caption("👇 가지고 계신 파일 형식에 맞는 곳에 업로드해주세요 (둘 중 하나만 선택)")
+
+# --- [UI] 업로드 버튼 2개로 분리 ---
+col_up1, col_up2 = st.columns(2)
+
+with col_up1:
+    st.info("📄 **버전 A: 기존 CSV**")
+    st.markdown("- 규격화된 포맷 (Duration 컬럼 등 포함)")
+    file_old = st.file_uploader("기존 형식 파일 업로드", type=['csv'], key="uploader_old")
+
+with col_up2:
+    st.info("📑 **버전 B: 신규 SportsCode CSV**")
+    st.markdown("- 태그가 많고 컬럼이 불규칙한 원본 파일")
+    file_new = st.file_uploader("신규 형식 파일 업로드", type=['csv'], key="uploader_new")
+
 st.divider()
 
+# 탭 컨테이너 설정 (기존 유지)
 tab_summary = st.container()
 tab1 = st.container()
 tab2 = st.container()
 tab3 = st.container()
+
+# --- [로직] 어떤 파일이 들어왔는지 확인해서 df 생성 ---
+raw_df = None
+
+# 1. 신규 파일이 들어왔으면 -> process_sportscode_data 실행
+if file_new is not None:
+    raw_df = process_sportscode_data(file_new)
+    st.success(f"✅ 신규 포맷(SportsCode) 분석 시작: {file_new.name}")
+
+# 2. 기존 파일이 들어왔으면 -> process_basic_data 실행
+elif file_old is not None:
+    raw_df = process_basic_data(file_old)
+    st.success(f"✅ 기존 포맷 분석 시작: {file_old.name}")
 
 if uploaded_file is not None:
     # 1. 데이터 로드
