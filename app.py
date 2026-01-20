@@ -1739,14 +1739,14 @@ elif file_old is not None:
     raw_df = process_basic_data(file_old)
     st.success(f"✅ 기존 포맷 분석 시작: {file_old.name}")
 
-if uploaded_file is not None:
-    # 1. 데이터 로드
-    raw_df = process_data(uploaded_file)
+# [변경 후 코드]
+if raw_df is not None and not raw_df.empty:
+    # 1. 데이터 로드 (위에서 이미 완료했으므로 생략)
     
     # 2. 지표 계산
     metrics_df = calculate_metrics(raw_df)
     quarter_summary = build_quarter_summary(raw_df)
-
+    
     def _normalize_columns(df: pd.DataFrame):
         if df.empty:
             return df
