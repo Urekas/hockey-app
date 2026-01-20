@@ -2274,6 +2274,6 @@ if raw_df is not None:
                     st.plotly_chart(fig_pie_att, use_container_width=True)
 
 else:
-    st.info("CSV ?? XML ?? ??? ???? ???.")
+    st.info("CSV 또는 XML을 넣어주세요.")
 
 
